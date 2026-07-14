@@ -1,25 +1,64 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import Link from "next/link";
-import { 
-  Menu, Bell, Calendar, HeadphonesIcon, ChevronDown, 
-  HelpCircle, ShoppingCart, CircleDollarSign, 
-  Pencil, Unlock, CloudDownload, ArrowRightLeft, Cloud
-} from "lucide-react";
+import { createClient } from "@supabase/supabase-js";
+import { Unlock, Pencil, CloudDownload, ArrowRightLeft, Cloud } from "lucide-react";
+
+// Configuración Supabase
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+);
 
 export default function CajaPage() {
-  const [cajaInicial, setCajaInicial] = useState<number | null>(110.00); // Simulando el valor de la captura
+  const [cajaInicial, setCajaInicial] = useState<number>(0);
   const [cajaAbierta, setCajaAbierta] = useState(false);
+  const [cargando, setCargando] = useState(true);
 
-  // Funciones simuladas para la interactividad
-  const abrirCaja = () => {
-    const monto = prompt("Ingrese el monto inicial para abrir la caja (S/):", "110.00");
+  // 1. CARGAR DATOS AL INICIAR
+  useEffect(() => {
+    const fetchCajaActual = async () => {
+      const { data, error } = await supabase
+        .from("cajas")
+        .select("*")
+        .eq("estado", "abierta")
+        .order("fecha_apertura", { ascending: false })
+        .limit(1)
+        .single();
+
+      if (data) {
+        setCajaInicial(Number(data.monto_inicial));
+        setCajaAbierta(true);
+      }
+      setCargando(false);
+    };
+
+    fetchCajaActual();
+  }, []);
+
+  // 2. ABRIR CAJA (GUARDAR EN DB)
+  const abrirCaja = async () => {
+    const monto = prompt("Ingrese el monto inicial (S/):", "0.00");
     if (monto && !isNaN(Number(monto))) {
-      setCajaInicial(parseFloat(monto));
-      setCajaAbierta(true);
+      const nuevoMonto = parseFloat(monto);
+      
+      const { data, error } = await supabase
+        .from("cajas")
+        .insert([{ monto_inicial: nuevoMonto, estado: "abierta" }])
+        .select()
+        .single();
+
+      if (error) {
+        alert("Error al abrir caja: " + error.message);
+      } else {
+        setCajaInicial(nuevoMonto);
+        setCajaAbierta(true);
+        alert("Caja abierta correctamente");
+      }
     }
   };
+
+  if (cargando) return <div>Cargando sistema de caja...</div>;
 
   return (
     <div className="flex h-screen bg-[#f4f6f9] text-sm overflow-hidden font-sans">
