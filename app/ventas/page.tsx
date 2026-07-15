@@ -13,6 +13,9 @@ const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
 const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 export default function VentasPage() {
+// ... otros estados
+const [cajaActiva, setCajaActiva] = useState<any>(null);
+
   // Estados de Base de Datos
   const [productosBD, setProductosBD] = useState<any[]>([]);
   const [categoriasBD, setCategoriasBD] = useState<any[]>([]);
@@ -40,20 +43,25 @@ export default function VentasPage() {
 
   // Carga inicial 
   const fetchDatosIniciales = async () => {
-    setCargando(true);
-    const [resProd, resCat] = await Promise.all([
-      supabase.from("productos").select("*, variantes:productos_variantes(*)").order("id", { ascending: true }),
-      supabase.from("categorias").select("*").order("orden", { ascending: true })
-    ]);
+  setCargando(true);
+  
+  // Agregamos la consulta de la caja
+  const [resProd, resCat, resCaja] = await Promise.all([
+    supabase.from("productos").select("*, variantes:productos_variantes(*)").order("id", { ascending: true }),
+    supabase.from("categorias").select("*").order("orden", { ascending: true }),
+    supabase.from("cajas").select("*").eq("estado", "abierta").maybeSingle() // <--- AGREGADO
+  ]);
 
     if (resCat.data) setCategoriasBD(resCat.data);
+    if (resCaja.data) setCajaActiva(resCaja.data); // <--- AGREGADO
     if (resProd.data) {
       setProductosBD(resProd.data.map(p => ({
         id: p.id,
         nombre: p.nombre,
         precioBase: p.precio_base,
         stock: p.stock_actual,
-        img: p.img,
+        img: p.img, // El icono
+        imagenUrl: p.imagen_url, // URL de la imagen real (asegúrate de crear esta columna)
         esGranel: p.es_granel,
         categoria_id: p.categoria_id,
         variantes: p.variantes
@@ -73,10 +81,8 @@ export default function VentasPage() {
     return busqueda ? coincideBusqueda : coincideCategoria;
   });
 
-  // Cálculos
-  const calcularSubtotal = () => carrito.reduce((acc, item) => acc + item.precio * item.cant, 0);
-  const IGV = calcularSubtotal() * 0.18; 
-  const Total = calcularSubtotal() + IGV;
+  // Cálculos sin IGV
+  const Total = carrito.reduce((acc, item) => acc + item.precio * item.cant, 0);
   const totalItems = carrito.reduce((acc, item) => acc + (item.esGranel ? 1 : item.cant), 0);
   const totalRecibido = pagos.reduce((acc, p) => acc + (parseFloat(p.monto) || 0), 0);
 
@@ -163,49 +169,51 @@ export default function VentasPage() {
 
   // Procesar Transacción y enlazar a la caja abierta
   const procesarPago = async () => {
-    // 1. Verificar si hay caja abierta
-    const { data: cajaActiva } = await supabase
-      .from("cajas")
-      .select("id")
-      .eq("estado", "abierta")
-      .single();
+  // 1. Verificación de seguridad
+  if (!cajaActiva) {
+    alert("¡ATENCIÓN! No hay ninguna caja abierta. Por favor, abre caja antes de empezar a vender.");
+    return; // Detiene la ejecución si no hay caja
+  }
 
-    if (!cajaActiva) {
-      alert("¡ATENCIÓN! No hay ninguna caja abierta. Por favor, abre caja antes de empezar a vender.");
-      return;
-    }
+  // 2. Guardar la venta principal
+  const { data: ventaData, error: ventaError } = await supabase
+    .from("ventas")
+    .insert({
+      total_venta: Total,
+      metodos_pago: pagos,
+      caja_id: cajaActiva.id 
+    })
+    .select()
+    .single();
 
-    // 2. Guardar la venta principal
-    const { data: ventaData, error: ventaError } = await supabase
-      .from("ventas")
-      .insert({
-        total_venta: Total,
-        metodos_pago: pagos,
-        caja_id: cajaActiva.id // AQUÍ ENLAZAMOS LA VENTA A LA CAJA
-      })
-      .select()
-      .single();
+  if (ventaError || !ventaData) return alert("Error al procesar la venta");
 
-    if (ventaError || !ventaData) return alert("Error al procesar la venta");
+  // 3. Guardar el detalle de la venta
+  const detalles = carrito.map(item => ({
+    venta_id: ventaData.id,
+    producto_id: item.id,
+    variante_nombre: item.variante_nombre,
+    cantidad: item.cant,
+    precio_unitario: item.precio
+  }));
+  
+  await supabase.from("venta_detalle").insert(detalles);
 
-    // 3. Guardar el detalle de la venta
-    const detalles = carrito.map(item => ({
-      venta_id: ventaData.id,
-      producto_id: item.id,
-      variante_nombre: item.variante_nombre,
-      cantidad: item.cant,
-      precio_unitario: item.precio
-    }));
-    await supabase.from("venta_detalle").insert(detalles);
-
-    alert(`¡Comprobante emitido con éxito por S/ ${Total.toFixed(2)}!`);
-    setCarrito([]);
-    setModalCobroAbierto(false);
-  };
+  alert(`¡Comprobante emitido con éxito por S/ ${Total.toFixed(2)}!`);
+  setCarrito([]);
+  setModalCobroAbierto(false);
+};
 
   return (
     <div className="flex h-screen bg-[#f4f6f9] text-sm overflow-hidden font-sans relative">
       <main className="flex-1 flex flex-col bg-white overflow-hidden">
+
+        {/* AQUI VA EL AVISO VISUAL */}
+      {!cajaActiva && (
+        <div className="bg-red-100 border-b border-red-200 p-3 text-center text-red-700 font-bold text-sm">
+          ⚠️ No hay caja abierta. No podrás procesar pagos.
+        </div>
+      )}
         
         {/* TABS SUPERIORES */}
         <div className="bg-white border-b border-gray-200 px-4 flex gap-8 text-gray-500 font-medium shrink-0 pt-4">
@@ -273,7 +281,14 @@ export default function VentasPage() {
                       className="grid grid-cols-12 gap-2 px-4 py-3 hover:bg-blue-50 cursor-pointer items-center transition-colors relative"
                     >
                       <div className="col-span-8 flex items-center gap-3">
-                        <div className="w-10 h-10 flex items-center justify-center text-xl bg-white rounded-lg border border-gray-200 shadow-sm shrink-0">{prod.img}</div>
+                        {/* ACTUALIZADO PARA SOPORTAR IMAGEN O ICONO */}
+                        <div className="w-10 h-10 flex items-center justify-center text-xl bg-white rounded-lg border border-gray-200 shadow-sm shrink-0 overflow-hidden">
+                          {prod.imagenUrl ? (
+                            <img src={prod.imagenUrl} alt={prod.nombre} className="w-full h-full object-cover" />
+                          ) : (
+                            <span>{prod.img || "📦"}</span>
+                          )}
+                        </div>
                         <div className="truncate">
                           <span className="text-sm font-bold text-gray-800 block truncate">{prod.nombre}</span>
                           {prod.esGranel && <span className="text-[10px] bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded font-bold mt-0.5 inline-block">⚖️ Pesable</span>}
@@ -384,8 +399,15 @@ export default function VentasPage() {
 
             <div className="bg-white border-t border-gray-200 flex flex-col mt-auto shrink-0 shadow-[0_-4px_10px_-1px_rgba(0,0,0,0.05)]">
               <div className="p-4 space-y-2">
-                <div className="flex justify-between text-xs text-gray-600 font-medium"><span>SubTotal ({totalItems.toFixed(totalItems % 1 !== 0 ? 2 : 0)} items)</span><span>S/ {calcularSubtotal().toFixed(2)}</span></div>
-                <div className="flex justify-between text-xs text-gray-600 font-medium"><span>IGV (18%)</span><span>S/ {IGV.toFixed(2)}</span></div>
+                <div className="flex justify-between text-sm text-gray-600 font-medium">
+                  <span>Total Items</span>
+                  <span>{totalItems.toFixed(totalItems % 1 !== 0 ? 2 : 0)}</span>
+                </div>
+                {/* IGV ELIMINADO */}
+                <div className="flex justify-between text-base text-gray-900 font-bold border-t border-gray-100 pt-2 mt-2">
+                  <span>Total a Pagar</span>
+                  <span className="text-[#00b4d8]">S/ {Total.toFixed(2)}</span>
+                </div>
                 
                 <button onClick={abrirModalCobro} disabled={carrito.length === 0} className="w-full mt-3 bg-[#00b4d8] disabled:bg-gray-300 text-white p-3.5 rounded-lg font-black text-sm flex justify-between items-center hover:bg-[#0096b4] transition-colors shadow-md">
                   <div className="flex items-center gap-2"><ShoppingCart size={18} /><span>COBRAR</span></div>

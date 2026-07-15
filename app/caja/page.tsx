@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@supabase/supabase-js";
 import { 
-  Pencil, Unlock, CloudDownload, ArrowRightLeft, Cloud, Lock 
+  Pencil, Unlock, CloudDownload, ArrowRightLeft, Cloud, Lock, X
 } from "lucide-react";
 
 // Configuración de Supabase
@@ -17,27 +17,54 @@ export default function CajaPage() {
 
   // Estados de la Caja
   const [cajaActiva, setCajaActiva] = useState<any>(null);
+  const [cajaAnterior, setCajaAnterior] = useState<any>(null);
   const [cargando, setCargando] = useState(true);
   
   // Estados de los cálculos
   const [totalEfectivo, setTotalEfectivo] = useState(0);
   const [totalYape, setTotalYape] = useState(0);
   const [cantidadTransacciones, setCantidadTransacciones] = useState(0);
+  const [totalTransferido, setTotalTransferido] = useState(0);
+
+  // Estados de Modales
+  const [modalTransferir, setModalTransferir] = useState(false);
+  const [montoATransferir, setMontoATransferir] = useState("");
+  const [modalReporte, setModalReporte] = useState(false);
+  const [modalEditarCaja, setModalEditarCaja] = useState(false);
+  const [nuevoMontoCaja, setNuevoMontoCaja] = useState("");
 
   // 1. CARGAR DATOS DE LA BASE DE DATOS
-  const cargarCajaYVentas = async () => {
-    setCargando(true);
-    // Buscar si hay una caja abierta
-    const { data: caja } = await supabase
+  const cargarCajaYVentas = async (mostrarCargando = true) => {
+    if (mostrarCargando) setCargando(true); // Solo activamos el spinner si es necesario
+    
+    const { data: caja, error: errorCaja } = await supabase
       .from("cajas")
       .select("*")
       .eq("estado", "abierta")
-      .single();
+      .order("id", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (errorCaja) {
+      console.error("Error al buscar caja abierta:", errorCaja);
+    }
+
+    const { data: cajaCerrada } = await supabase
+      .from("cajas")
+      .select("*")
+      .eq("estado", "cerrada")
+      .order("fecha_cierre", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+      
+    if (cajaCerrada) {
+      setCajaAnterior(cajaCerrada);
+    }
 
     if (caja) {
       setCajaActiva(caja);
+      setNuevoMontoCaja(caja.monto_inicial.toString());
       
-      // Si hay caja abierta, traer las ventas vinculadas a esta caja
       const { data: ventas } = await supabase
         .from("ventas")
         .select("metodos_pago")
@@ -50,7 +77,6 @@ export default function CajaPage() {
       if (ventas) {
         ventas.forEach((venta: any) => {
           count++;
-          // Parsear los métodos de pago guardados como JSON
           const pagos = venta.metodos_pago || [];
           pagos.forEach((pago: any) => {
             const monto = parseFloat(pago.monto) || 0;
@@ -59,6 +85,14 @@ export default function CajaPage() {
           });
         });
       }
+      else {
+      setCajaActiva(null);
+      setTotalEfectivo(0);
+      setTotalYape(0);
+      setCantidadTransacciones(0);
+    }
+    
+    if (mostrarCargando) setCargando(false);
 
       setTotalEfectivo(sumEfectivo);
       setTotalYape(sumYape);
@@ -72,44 +106,38 @@ export default function CajaPage() {
     setCargando(false);
   };
 
-  // UNIFICADO: Validar sesión local y cargar los datos correspondientes
   useEffect(() => {
     const inicializarSistema = async () => {
       try {
-        // 1. Validar si hay una sesión activa en el LocalStorage
         const userRole = localStorage.getItem("userRole");
         if (!userRole) {
           router.push("/login");
           return;
         }
 
-        // 2. Intentar autenticación automática en Supabase (si es necesaria para RLS)
-        // No bloqueará la carga de la página si falla
         try {
           await supabase.auth.signInWithPassword({
             email: 'test@test.com',
             password: '12345678',
           });
         } catch (authError) {
-          console.warn("No se pudo iniciar sesión automática en Supabase, se procederá con la sesión local.");
+          console.warn("No se pudo iniciar sesión automática en Supabase.");
         }
         
-        // 3. Cargar la información de la base de datos
         await cargarCajaYVentas();
       } catch (error) {
         console.error("Error al inicializar sesión o cargar datos:", error);
         setCargando(false);
       }
+      await cargarCajaYVentas(true); // Aquí sí queremos ver el cargando al entrar
     };
 
     inicializarSistema();
   }, [router]);
 
-  // 2. ABRIR CAJA (Guarda en Base de Datos)
+  // 2. ABRIR CAJA
   const abrirCaja = async () => {
-    // Verificar sesión local activa antes de continuar
     const userRole = localStorage.getItem("userRole");
-    
     if (!userRole) {
       alert("Debes haber iniciado sesión para abrir caja.");
       router.push("/login");
@@ -117,37 +145,30 @@ export default function CajaPage() {
     }
 
     const { data: { user } } = await supabase.auth.getUser();
-
     const monto = prompt("Ingrese el monto inicial (S/):", "110.00");
     if (monto && !isNaN(Number(monto))) {
-      // Creamos la estructura de inserción. Si existe usuario en Supabase lo vinculamos,
-      // de lo contrario omitimos 'user_id' o lo enviamos nulo si tu tabla lo permite.
       const nuevaCaja: any = { 
         monto_inicial: parseFloat(monto), 
         estado: "abierta"
       };
 
-      if (user?.id) {
-        nuevaCaja.user_id = user.id;
-      }
+      if (user?.id) nuevaCaja.user_id = user.id;
 
-      const { error } = await supabase
-        .from("cajas")
-        .insert([nuevaCaja]);
+      const { error } = await supabase.from("cajas").insert([nuevaCaja]);
       
       if (error) {
-        console.error(error);
         alert("Error al abrir la caja: " + error.message);
       } else {
-        alert("¡Caja aperturada!");
-        cargarCajaYVentas();
+        alert("¡Caja aperturada con éxito!");
+        await cargarCajaYVentas(); 
       }
     }
   };
 
-  // 3. CERRAR CAJA
+ // 3. CERRAR CAJA (CORREGIDO: Sin validaciones bloqueantes)
   const cerrarCaja = async () => {
-    const confirmar = confirm(`¿Estás seguro de cerrar la caja actual?\nDeberías transferir los S/ ${(cajaActiva.monto_inicial + totalEfectivo).toFixed(2)} a Caja General antes de cerrar.`);
+    const confirmar = confirm("¿Estás seguro de que deseas cerrar la caja?");
+    
     if (confirmar && cajaActiva) {
       const { error } = await supabase
         .from("cajas")
@@ -155,22 +176,57 @@ export default function CajaPage() {
         .eq("id", cajaActiva.id);
       
       if (error) {
-        alert("Error al cerrar la caja");
+        alert("Error al cerrar la caja: " + error.message);
       } else {
-        alert("Caja cerrada correctamente. Ya puedes aperturar el siguiente turno.");
-        cargarCajaYVentas();
+        alert("Caja cerrada correctamente.");
+        
+        // 1. Limpiamos manualmente el estado de la caja
+        setCajaActiva(null); 
+        
+        // 2. Recargamos los datos SIN mostrar la pantalla de carga (false)
+        await cargarCajaYVentas(false); 
       }
+    }
+};
+  
+  // 4. LÓGICA DE MODALES Y ACCIONES
+  const handleAbrirTransferencia = () => {
+    if (!cajaActiva) return alert("Debes abrir la caja primero.");
+    setMontoATransferir(totalEfectivo.toString());
+    setModalTransferir(true);
+  };
+
+  const confirmarTransferencia = () => {
+    const monto = parseFloat(montoATransferir);
+    if (isNaN(monto) || monto <= 0) return alert("Monto inválido");
+    
+    setTotalTransferido((prev) => prev + monto);
+    setModalTransferir(false);
+    alert("Transferencia a Caja General registrada exitosamente.");
+  };
+
+  const guardarEdicionCaja = async () => {
+    const monto = parseFloat(nuevoMontoCaja);
+    if (isNaN(monto) || monto < 0) return alert("Monto inválido");
+    
+    const { error } = await supabase
+      .from("cajas")
+      .update({ monto_inicial: monto })
+      .eq("id", cajaActiva.id);
+      
+    if (error) {
+      alert("Error al actualizar la caja inicial");
+    } else {
+      setCajaActiva({ ...cajaActiva, monto_inicial: monto });
+      setModalEditarCaja(false);
+      alert("Monto de caja inicial actualizado.");
     }
   };
 
-  // 4. TRANSFERIR DINERO
-  const transferirDinero = () => {
-    if (!cajaActiva) return alert("Debes abrir la caja primero.");
-    alert(`Transferencia a Caja General iniciada.\n\nEl sistema descontará automáticamente el excedente y dejará los S/ ${cajaActiva.monto_inicial.toFixed(2)} iniciales para el siguiente turno.`);
-  };
-
+  // Cálculos Finales
   const totalVentas = totalEfectivo + totalYape;
-  const dineroEnCajaFisica = cajaActiva ? cajaActiva.monto_inicial + totalEfectivo : 0;
+  const dineroEnCajaFisica = cajaActiva ? (cajaActiva.monto_inicial + totalEfectivo - totalTransferido) : 0;
+  const totalEfectivoConInicial = (cajaActiva?.monto_inicial || 0) + totalEfectivo;
 
   if (cargando) {
     return (
@@ -181,7 +237,7 @@ export default function CajaPage() {
   }
 
   return (
-    <div className="flex h-screen bg-[#f4f6f9] text-sm overflow-hidden font-sans">
+    <div className="flex h-screen bg-[#f4f6f9] text-sm overflow-hidden font-sans relative">
       <main className="flex-1 flex flex-col bg-[#f4f6f9] overflow-y-auto">
         
         {/* TABS */}
@@ -200,7 +256,10 @@ export default function CajaPage() {
             <h2 className="text-gray-800 text-lg font-medium">Caja del día {new Date().toLocaleDateString('es-PE')}</h2>
             
             <div className="flex gap-4">
-              <button className="flex items-center gap-3 bg-white pr-4 rounded-md border border-gray-200 hover:shadow-md transition-shadow group">
+              <button 
+                onClick={() => cajaActiva ? setModalEditarCaja(true) : alert("Abre una caja primero")} 
+                className="flex items-center gap-3 bg-white pr-4 rounded-md border border-gray-200 hover:shadow-md transition-shadow group"
+              >
                 <div className="bg-[#dcfce7] text-[#16a34a] p-3 rounded-l-md"><Pencil size={20} /></div>
                 <div className="text-left">
                   <p className="font-semibold text-gray-700 text-sm group-hover:text-[#16a34a]">Editar Caja inicial</p>
@@ -208,7 +267,6 @@ export default function CajaPage() {
                 </div>
               </button>
 
-              {/* BOTON DINÁMICO: ABRIR O CERRAR */}
               {cajaActiva ? (
                 <button onClick={cerrarCaja} className="flex items-center gap-3 bg-white pr-4 rounded-md border border-gray-200 hover:shadow-md transition-shadow group">
                   <div className="bg-[#fee2e2] text-[#ef4444] p-3 rounded-l-md"><Lock size={20} /></div>
@@ -227,7 +285,10 @@ export default function CajaPage() {
                 </button>
               )}
 
-              <button className="flex items-center gap-3 bg-white pr-4 rounded-md border border-gray-200 hover:shadow-md transition-shadow group">
+              <button 
+                onClick={() => setModalReporte(true)}
+                className="flex items-center gap-3 bg-white pr-4 rounded-md border border-gray-200 hover:shadow-md transition-shadow group"
+              >
                 <div className="bg-[#e0f2fe] text-[#0284c7] p-3 rounded-l-md"><CloudDownload size={20} /></div>
                 <div className="text-left">
                   <p className="font-semibold text-gray-700 text-sm group-hover:text-[#0284c7]">Reporte de caja</p>
@@ -235,7 +296,10 @@ export default function CajaPage() {
                 </div>
               </button>
 
-              <button onClick={transferirDinero} className="flex items-center gap-3 bg-white pr-4 rounded-md border border-gray-200 hover:shadow-md transition-shadow group">
+              <button 
+                onClick={handleAbrirTransferencia} 
+                className="flex items-center gap-3 bg-white pr-4 rounded-md border border-gray-200 hover:shadow-md transition-shadow group"
+              >
                 <div className="bg-[#fef3c7] text-[#d97706] p-3 rounded-l-md"><ArrowRightLeft size={20} /></div>
                 <div className="text-left">
                   <p className="font-semibold text-gray-700 text-sm group-hover:text-[#d97706]">Transferir dinero</p>
@@ -251,18 +315,29 @@ export default function CajaPage() {
             {/* 1. Resumen de caja */}
             <div>
               <h3 className="text-gray-400 font-semibold text-xs mb-3">Resumen de caja</h3>
-              <div className="bg-white p-5 rounded-lg border border-gray-200 shadow-sm space-y-4 h-[184px]">
+              <div className="bg-white p-5 rounded-lg border border-gray-200 shadow-sm space-y-3 h-[184px]">
+                
+                {/* Estado Actual */}
                 <div className="flex justify-between items-center text-sm">
-                  <span className="text-gray-600">Estado de caja</span> 
+                  <span className="text-gray-600">Estado de caja actual</span> 
                   <span className={`font-bold ${cajaActiva ? "text-[#00b4d8]" : "text-[#ef4444]"}`}>
-                    {cajaActiva ? "Caja abierta" : "Caja cerrada"}
+                    {cajaActiva ? "Abierta" : "Cerrada"}
                   </span>
                 </div>
-                <div className="flex justify-between items-center text-sm">
+
+                {/* Caja Anterior (Movida debajo del estado actual) */}
+                <div className="flex justify-between items-center text-xs pb-2 border-b border-gray-100">
+                  <span className="text-gray-500">Caja Anterior</span> 
+                  <span className="text-gray-400 font-medium">
+                    {cajaAnterior ? `Cerrada - S/ ${cajaAnterior.monto_inicial.toFixed(2)}` : "Sin registros previos"}
+                  </span>
+                </div>
+
+                <div className="flex justify-between items-center text-sm pt-1">
                   <span className="text-gray-600">Caja inicial</span> 
                   <span className="text-gray-500">S/ {cajaActiva ? cajaActiva.monto_inicial.toFixed(2) : "0.00"}</span>
                 </div>
-                <div className="pt-4 mt-2 border-t flex justify-between items-center text-base">
+                <div className="pt-2 mt-2 border-t flex justify-between items-center text-base">
                   <span className="text-gray-800 font-medium">Dinero en caja (Físico)</span> 
                   <span className="font-bold text-gray-800 text-lg">S/ {dineroEnCajaFisica.toFixed(2)}</span>
                 </div>
@@ -281,7 +356,7 @@ export default function CajaPage() {
                 <div className="flex justify-between text-sm text-gray-600 mt-3 font-medium">
                   <span>Ticket Interno</span>
                   <span>{cantidadTransacciones}</span>
-                  <span className="font-bold text-gray-800">S/ {totalVentas.toFixed(2)}</span>
+                  <span title="Incluye el dinero de la caja incial" className="font-bold text-gray-800">S/ {totalVentas.toFixed(2)}</span>
                 </div>
               </div>
             </div>
@@ -311,13 +386,33 @@ export default function CajaPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
+                  
+                  {/* EFECTIVO */}
                   <tr className="hover:bg-gray-50">
                     <td className="px-6 py-4 font-medium text-gray-800">Efectivo</td>
                     <td className="px-6 py-4 text-center">—</td>
                     <td className="px-6 py-4 text-center text-emerald-600">S/ {totalEfectivo.toFixed(2)}</td>
                     <td className="px-6 py-4 text-center text-red-400">S/ 0.00</td>
-                    <td className="px-6 py-4 text-right font-medium text-gray-800">S/ {totalEfectivo.toFixed(2)}</td>
+                    <td 
+                      className="px-6 py-4 text-right font-bold text-gray-900 cursor-help transition-colors hover:text-[#00b4d8]"
+                      title="Incluye el dinero de la caja inicial"
+                    >
+                      S/ {totalEfectivoConInicial.toFixed(2)}
+                    </td>
                   </tr>
+
+                  {/* DEPÓSITO */}
+                  <tr className="hover:bg-gray-50 bg-red-50/20">
+                    <td className="px-6 py-4 font-medium text-gray-800 flex items-center gap-2">
+                      <ArrowRightLeft size={14} className="text-red-500"/> Depósito a caja general
+                    </td>
+                    <td className="px-6 py-4 text-center">—</td>
+                    <td className="px-6 py-4 text-center text-emerald-600">S/ 0.00</td>
+                    <td className="px-6 py-4 text-center text-red-500 font-medium">S/ {totalTransferido.toFixed(2)}</td>
+                    <td className="px-6 py-4 text-right font-medium text-red-600">-S/ {totalTransferido.toFixed(2)}</td>
+                  </tr>
+
+                  {/* YAPE / PLIN */}
                   <tr className="hover:bg-gray-50">
                     <td className="px-6 py-4 font-medium text-gray-800">Yape / Plin</td>
                     <td className="px-6 py-4 text-center">—</td>
@@ -325,6 +420,7 @@ export default function CajaPage() {
                     <td className="px-6 py-4 text-center text-red-400">S/ 0.00</td>
                     <td className="px-6 py-4 text-right font-medium text-gray-800">S/ {totalYape.toFixed(2)}</td>
                   </tr>
+
                 </tbody>
                 <tfoot className="bg-gray-50 text-gray-700 border-t border-gray-200">
                   <tr>
@@ -332,16 +428,120 @@ export default function CajaPage() {
                     <td className="px-6 py-3 text-right font-bold text-[#00b4d8]">S/ {totalVentas.toFixed(2)}</td>
                   </tr>
                   <tr>
-                    <td colSpan={4} className="px-6 py-3 text-gray-500 font-medium">Total en caja física (Caja inicial + Ventas Efectivo)</td>
+                    <td colSpan={4} className="px-6 py-3 text-gray-500 font-medium">Total en caja física (Caja inicial + Ventas - Depósitos)</td>
                     <td className="px-6 py-3 text-right font-bold text-gray-800 text-base">S/ {dineroEnCajaFisica.toFixed(2)}</td>
                   </tr>
                 </tfoot>
               </table>
             </div>
           </div>
-
         </div>
       </main>
+
+      {/* =========================================================================
+          MODALES
+      ========================================================================= */}
+
+      {/* 1. Modal Editar Caja Inicial */}
+      {modalEditarCaja && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md overflow-hidden">
+            <div className="p-4 border-b flex justify-between items-center bg-gray-50">
+              <h3 className="font-semibold text-gray-800">Editar monto de apertura</h3>
+              <button onClick={() => setModalEditarCaja(false)} className="text-gray-400 hover:text-gray-600"><X size={20} /></button>
+            </div>
+            <div className="p-5">
+              <div className="bg-yellow-100 text-yellow-800 p-3 rounded-lg text-sm mb-5 font-medium border border-yellow-200">
+                La modificación del monto de apertura de la caja sólo puede realizarse con usuarios que no han realizado ningún movimiento.
+              </div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Nuevo monto (S/)</label>
+              <input 
+                type="number" 
+                value={nuevoMontoCaja}
+                onChange={(e) => setNuevoMontoCaja(e.target.value)}
+                placeholder="Ej. 110.00"
+                className="w-full border border-gray-300 rounded-lg px-4 py-2 text-gray-900 placeholder-gray-400 focus:ring-2 focus:ring-[#00b4d8] focus:border-[#00b4d8] outline-none bg-white transition-colors"
+              />
+            </div>
+            <div className="p-4 border-t bg-gray-50 flex justify-end gap-3">
+              <button onClick={() => setModalEditarCaja(false)} className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg font-medium transition">Cancelar</button>
+              <button onClick={guardarEdicionCaja} className="px-4 py-2 bg-[#00b4d8] text-white rounded-lg font-medium hover:bg-[#0096b4] transition">Guardar cambios</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 2. Modal Transferir Dinero */}
+      {modalTransferir && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm overflow-hidden">
+            <div className="p-4 border-b flex justify-between items-center bg-gray-50">
+              <h3 className="font-semibold text-gray-800 flex items-center gap-2">
+                <ArrowRightLeft size={18} className="text-[#d97706]"/> Transferir a Caja General
+              </h3>
+              <button onClick={() => setModalTransferir(false)} className="text-gray-400 hover:text-gray-600"><X size={20} /></button>
+            </div>
+            <div className="p-5">
+              <p className="text-sm text-gray-600 mb-4">
+                El monto sugerido corresponde a las ventas en efectivo. Se mantendrán los S/ {cajaActiva?.monto_inicial.toFixed(2)} iniciales en caja chica.
+              </p>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Monto a depositar (S/)</label>
+              <input 
+                type="number" 
+                value={montoATransferir}
+                onChange={(e) => setMontoATransferir(e.target.value)}
+                placeholder="Ej. 50.00"
+                className="w-full border border-gray-300 rounded-lg px-4 py-2 text-gray-900 placeholder-gray-400 focus:ring-2 focus:ring-[#d97706] focus:border-[#d97706] outline-none bg-white transition-colors"
+              />
+              <p className="text-xs text-gray-400 mt-2 text-right">Disponible en efectivo: S/ {totalEfectivo.toFixed(2)}</p>
+            </div>
+            <div className="p-4 border-t bg-gray-50 flex justify-end gap-3">
+              <button onClick={() => setModalTransferir(false)} className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg font-medium transition">Cancelar</button>
+              <button onClick={confirmarTransferencia} className="px-4 py-2 bg-[#d97706] text-white rounded-lg font-medium hover:bg-[#b45309] transition">Transferir</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 3. Modal Reporte de Caja */}
+      {modalReporte && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md overflow-hidden">
+            <div className="p-4 border-b flex justify-between items-center bg-[#0284c7] text-white">
+              <h3 className="font-semibold flex items-center gap-2">
+                <CloudDownload size={18} /> Reporte de Caja Actual
+              </h3>
+              <button onClick={() => setModalReporte(false)} className="text-white/80 hover:text-white"><X size={20} /></button>
+            </div>
+            <div className="p-6 space-y-4">
+              <div className="flex justify-between border-b border-dashed pb-2">
+                <span className="text-gray-500">Fecha:</span>
+                <span className="font-medium text-gray-800">{new Date().toLocaleDateString('es-PE')}</span>
+              </div>
+              <div className="flex justify-between border-b border-dashed pb-2">
+                <span className="text-gray-500">Caja Inicial:</span>
+                <span className="font-medium text-gray-800">S/ {cajaActiva?.monto_inicial.toFixed(2) || "0.00"}</span>
+              </div>
+              <div className="flex justify-between border-b border-dashed pb-2">
+                <span className="text-gray-500">Ventas Totales:</span>
+                <span className="font-medium text-[#00b4d8]">S/ {totalVentas.toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between border-b border-dashed pb-2">
+                <span className="text-gray-500">Depositado a C. General:</span>
+                <span className="font-medium text-red-500">-S/ {totalTransferido.toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between pt-2 bg-gray-50 p-3 rounded-lg">
+                <span className="text-gray-700 font-bold">Total Físico Esperado:</span>
+                <span className="font-black text-gray-900 text-lg">S/ {dineroEnCajaFisica.toFixed(2)}</span>
+              </div>
+            </div>
+            <div className="p-4 border-t bg-gray-50 flex justify-end gap-3">
+              <button onClick={() => setModalReporte(false)} className="w-full px-4 py-2 bg-gray-200 text-gray-800 rounded-lg font-medium hover:bg-gray-300 transition">Cerrar vista previa</button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
