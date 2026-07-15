@@ -161,24 +161,34 @@ export default function VentasPage() {
     setPagos(pagos.map(p => p.id === id ? { ...p, [propiedad]: valor } : p));
   };
 
-  // Procesar Transacción y registrar automáticamente en el Kardex
+  // Procesar Transacción y enlazar a la caja abierta
   const procesarPago = async () => {
-    // 1. Guardar la venta principal
+    // 1. Verificar si hay caja abierta
+    const { data: cajaActiva } = await supabase
+      .from("cajas")
+      .select("id")
+      .eq("estado", "abierta")
+      .single();
+
+    if (!cajaActiva) {
+      alert("¡ATENCIÓN! No hay ninguna caja abierta. Por favor, abre caja antes de empezar a vender.");
+      return;
+    }
+
+    // 2. Guardar la venta principal
     const { data: ventaData, error: ventaError } = await supabase
       .from("ventas")
       .insert({
         total_venta: Total,
         metodos_pago: pagos,
+        caja_id: cajaActiva.id // AQUÍ ENLAZAMOS LA VENTA A LA CAJA
       })
       .select()
       .single();
 
-    if (ventaError || !ventaData) {
-      alert("Error al procesar la venta");
-      return;
-    }
+    if (ventaError || !ventaData) return alert("Error al procesar la venta");
 
-    // 2. Guardar el detalle de la venta
+    // 3. Guardar el detalle de la venta
     const detalles = carrito.map(item => ({
       venta_id: ventaData.id,
       producto_id: item.id,
@@ -188,28 +198,9 @@ export default function VentasPage() {
     }));
     await supabase.from("venta_detalle").insert(detalles);
 
-    // 3. Descontar stock y registrar el movimiento en el Kardex silenciosamente
-    for (const item of carrito) {
-      const prod = productosBD.find(p => p.id === item.id);
-      if (prod) {
-        // Actualiza el stock
-        await supabase.from("productos").update({ stock_actual: prod.stock - item.cant }).eq("id", prod.id);
-        // Registra el movimiento en Kardex
-        await supabase.from("kardex").insert({
-          producto_id: prod.id,
-          tipo_movimiento: "VENTA",
-          cantidad: item.cant,
-          notas: `Salida por comprobante de venta ID: ${ventaData.id}`
-        });
-      }
-    }
-
     alert(`¡Comprobante emitido con éxito por S/ ${Total.toFixed(2)}!`);
     setCarrito([]);
     setModalCobroAbierto(false);
-    
-    // Recargar productos para actualizar el stock visual (si lo usaras en la vista más adelante)
-    fetchDatosIniciales();
   };
 
   return (
